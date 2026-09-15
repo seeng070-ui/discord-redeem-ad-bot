@@ -4,7 +4,7 @@ import secrets
 import os
 
 # Securely pulls token from Render's Environment settings
-TOKEN = os.getenv("MTUyOTA4Njg5MzIzOTU2NjUwMQ.G-Y71n.swRDm4kQ3OiQ5yBhA7aELM3loM_YLEQV9z7BQM")
+TOKEN = os.getenv("BOT_TOKEN")
 
 intents = discord.Intents.default()
 intents.message_content = True

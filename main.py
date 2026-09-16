@@ -1,221 +1,94 @@
 import discord
 from discord import app_commands
+from discord.ext import commands, tasks
 import os
-import json
-import asyncio
-import requests
-import secrets
+from flask import Flask
+from threading import Thread
 
-CONFIG_FILE = "slash_bot_config.json"
-# 🔴 IMPORTANT: Replace this with your exact personal Discord User ID
-BOT_OWNER_ID = 123456789012345678  
+# --- FLASK BACKGROUND SERVER FOR RENDER ---
+app = Flask('')
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return {"redeem_codes": [], "users": {}}
+@app.route('/')
+def home():
+    return "Bot is alive and running!"
 
-def save_config(config):
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=4)
+def run_flask():
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 
-config_data = load_config()
-active_loops = {}
+Thread(target=run_flask).start()
 
-class MyBot(discord.Client):
-    def __init__(self):
-        super().__init__(intents=discord.Intents.default())
-        self.tree = app_commands.CommandTree(self)
+# --- DISCORD BOT SETUP ---
+TOKEN = os.getenv("BOT_TOKEN")
 
-    async def setup_hook(self):
-        await self.tree.sync()
-        print("[✓] Slash commands synced globally!")
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-    async def on_ready(self):
-        print(f'[✓] Logged in as {self.user}')
+user_configs = {}
 
-bot = MyBot()
+class UserAdManager:
+    def __init__(self, user_id):
+        self.user_id = user_id
+        self.channel_id = None
+        self.message = "Default advertisement message. Use /setmessage to change!"
+        self.interval_minutes = 30
+        self.ad_loop = None
 
-def check_premium(user_id: str):
-    user_settings = config_data["users"].get(user_id, {})
-    return user_settings.get("premium", False)
+    def start_task(self):
+        if self.ad_loop and self.ad_loop.is_running():
+            self.ad_loop.stop()
 
-# Advertisement sender background task loop
-async def run_ad_sender(user_id, channel_id, token, message, interval):
-    url = f"https://discord.com{channel_id}/messages"
-    headers = {"Authorization": token, "Content-Type": "application/json"}
-    payload = {"content": message}
+        @tasks.loop(minutes=self.interval_minutes)
+        async def run_ad():
+            if self.channel_id:
+                channel = bot.get_channel(self.channel_id)
+                if channel:
+                    try:
+                        await channel.send(f"📢 **Ad by <@{self.user_id}>:**\n{self.message}")
+                    except Exception as e:
+                        print(f"Error sending ad: {e}")
 
-    while active_loops.get(user_id):
-        try:
-            response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers)
-            if response.status_code == 200:
-                print(f"[+] Advertisement sent successfully for User {user_id}")
-            elif response.status_code == 401:
-                print(f"[!] Invalid Token for User {user_id}. Loop stopped automatically.")
-                active_loops[user_id] = False
-                break
-        except Exception as e:
-            print(f"[!] Error broadcasting advertisement: {e}")
-        
-        # Sleeps in 1-second chunks so that the stop command reacts instantly
-        for _ in range(int(interval)):
-            if not active_loops.get(user_id):
-                break
-            await asyncio.sleep(1)
+        self.ad_loop = run_ad
+        self.ad_loop.start()
 
-# 1. GENERATE CODE (Owners Only)
-@bot.tree.command(name="generate_code", description="[OWNER ONLY] Generate a new premium license redeem code.")
-async def generate_code(interaction: discord.Interaction):
-    if interaction.user.id != BOT_OWNER_ID:
-        await interaction.response.send_message("❌ This command can only be executed by the Bot Owner!", ephemeral=True)
+def get_user_config(user_id):
+    if user_id not in user_configs:
+        user_configs[user_id] = UserAdManager(user_id)
+    return user_configs[user_id]
+
+# --- SYNCHRONIZE SLASH COMMANDS ---
+@bot.event
+async def on_ready():
+    print(f"{bot.user.name} is online!")
+    try:
+        # Pushes your / commands straight to Discord's servers
+        synced = await bot.tree.sync()
+        print(f"Successfully synced {len(synced)} slash command(s).")
+    except Exception as e:
+        print(f"Failed to sync commands: {e}")
+
+# --- TRUE SLASH COMMANDS ---
+@bot.tree.command(name="setchannel", description="Set the current text channel for your advertisements.")
+async def setchannel(interaction: discord.Interaction):
+    config = get_user_config(interaction.user.id)
+    config.channel_id = interaction.channel_id
+    await interaction.response.send_message(f"✅ Advertising channel set to {interaction.channel.mention}!")
+
+@bot.tree.command(name="setmessage", description="Set your custom advertisement message text.")
+@app_commands.describe(msg="Your advertisement text layout")
+async def setmessage(interaction: discord.Interaction, msg: str):
+    config = get_user_config(interaction.user.id)
+    config.message = msg
+    await interaction.response.send_message("✅ Your advertisement text has been saved successfully!")
+
+@bot.tree.command(name="startadv", description="Kick off the automated recurring advertising timer.")
+async def startadv(interaction: discord.Interaction):
+    config = get_user_config(interaction.user.id)
+    if not config.channel_id:
+        await interaction.response.send_message("❌ Set an advertising channel first using `/setchannel`!", ephemeral=True)
         return
-
-    new_code = f"ADS-{secrets.token_hex(4).upper()}"
-    config_data["redeem_codes"].append(new_code)
-    save_config(config_data)
-    await interaction.response.send_message(
-        f"✅ **New key generated successfully:**\n`{new_code}`\n\nUsers can claim this using `/redeem`.", 
-        ephemeral=True
-    )
-
-# 2. REDEEM CODE
-@bot.tree.command(name="redeem", description="Redeem a valid license code to unlock premium advertising features.")
-@app_commands.describe(code="Your premium redeem code")
-async def redeem(interaction: discord.Interaction, code: str):
-    user_id = str(interaction.user.id)
     
-    if check_premium(user_id):
-        await interaction.response.send_message("❌ You are already a premium member!", ephemeral=True)
-        return
+    config.start_task()
+    await interaction.response.send_message(f"🚀 Auto-advertising started! Posting every {config.interval_minutes} minutes.")
 
-    if code in config_data["redeem_codes"]:
-        config_data["redeem_codes"].remove(code) # Key gets removed once claimed
-        if user_id not in config_data["users"]:
-            config_data["users"][user_id] = {}
-        
-        config_data["users"][user_id]["premium"] = True
-        save_config(config_data)
-        await interaction.response.send_message("🎉 **Congratulations!** Your code has been successfully redeemed. You can now use config settings.", ephemeral=True)
-    else:
-        await interaction.response.send_message("❌ Invalid or expired redeem code. Please double-check and try again.", ephemeral=True)
-
-# 3. SET TOKEN
-@bot.tree.command(name="set_token", description="Configure your personal Discord Account Token (Not a Bot Token).")
-@app_commands.describe(token="Your Discord User Token")
-async def set_token(interaction: discord.Interaction, token: str):
-    user_id = str(interaction.user.id)
-    if not check_premium(user_id):
-        await interaction.response.send_message("🔒 Access Denied. Please run `/redeem` to unlock this system first.", ephemeral=True)
-        return
-
-    if user_id not in config_data["users"]:
-        config_data["users"][user_id] = {}
-        
-    config_data["users"][user_id]["token"] = token
-    save_config(config_data)
-    await interaction.response.send_message("✅ Your account token has been updated and securely stored!", ephemeral=True)
-
-# 4. CONFIG
-@bot.tree.command(name="config", description="Configure the channel, time loop interval, and message body for your ads.")
-@app_commands.describe(
-    channel_id="The target Channel ID where advertisements should be sent",
-    interval_seconds="Delay timeline threshold between transmissions (in seconds)",
-    message="The body content text of your advertisement"
-)
-async def config(interaction: discord.Interaction, channel_id: str, interval_seconds: int, message: str):
-    user_id = str(interaction.user.id)
-    if not check_premium(user_id):
-        await interaction.response.send_message("🔒 Access Denied. Please run `/redeem` first.", ephemeral=True)
-        return
-
-    if user_id not in config_data["users"] or "token" not in config_data["users"][user_id]:
-        await interaction.response.send_message("❌ Please set your account token via `/set_token` before saving configurations.", ephemeral=True)
-        return
-
-    config_data["users"][user_id]["channel_id"] = channel_id
-    config_data["users"][user_id]["interval"] = interval_seconds
-    config_data["users"][user_id]["message"] = message
-    save_config(config_data)
-
-    await interaction.response.send_message(
-        f"✅ **Configuration Matrix Updated!**\n"
-        f"• **Channel ID:** `{channel_id}`\n"
-        f"• **Interval Loop:** `{interval_seconds}` seconds\n"
-        f"• **Ad Text Content:** `{message}`", 
-        ephemeral=True
-    )
-
-# 5. START
-@bot.tree.command(name="start", description="Activate the automated advertisement sender loop.")
-async def start(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    if not check_premium(user_id):
-        await interaction.response.send_message("🔒 Access Denied.", ephemeral=True)
-        return
-
-    if active_loops.get(user_id):
-        await interaction.response.send_message("⚠️ Your advertisement broadcaster is already running!", ephemeral=True)
-        return
-
-    user_settings = config_data["users"].get(user_id, {})
-    token = user_settings.get("token")
-    channel_id = user_settings.get("channel_id")
-    interval = user_settings.get("interval")
-    message = user_settings.get("message")
-
-    if not all([token, channel_id, interval, message]):
-        await interaction.response.send_message("❌ Configuration setup incomplete. Check token and `/config` settings before launching.", ephemeral=True)
-        return
-
-    active_loops[user_id] = True
-    bot.loop.create_task(run_ad_sender(user_id, channel_id, token, message, interval))
-    await interaction.response.send_message("🚀 **Auto-Advertiser Activated!** Your custom ad sequence will now begin broadcasting.", ephemeral=True)
-
-# 6. STOP
-@bot.tree.command(name="stop", description="Immediately terminate your running automated advertisement stream.")
-async def stop(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    
-    if not check_premium(user_id):
-        await interaction.response.send_message("🔒 Access Denied.", ephemeral=True)
-        return
-
-    if not active_loops.get(user_id):
-        await interaction.response.send_message("⚠️ Your auto-advertiser sequence is not active right now.", ephemeral=True)
-        return
-
-    active_loops[user_id] = False
-    await interaction.response.send_message("🛑 **Auto-Advertiser Terminated Successfully.** No further messages will be dispatched.", ephemeral=True)
-
-# 7. STATUS
-@bot.tree.command(name="status", description="Query current configuration values and operational loop runtime states.")
-async def status(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    is_prem = check_premium(user_id)
-    
-    if not is_prem:
-        await interaction.response.send_message("📊 **License Status:** Basic Tier (Not Premium). Please activate using a token key.", ephemeral=True)
-        return
-
-    user_settings = config_data["users"].get(user_id, {})
-    bot_status = "RUNNING 🟢" if active_loops.get(user_id) else "STOPPED 🔴"
-    
-    has_token = "Configured [✓]" if user_settings.get("token") else "Missing [✗]"
-    channel = user_settings.get("channel_id", "Not set")
-    interval = user_settings.get("interval", "Not set")
-    msg = user_settings.get("message", "Not set")
-
-    status_embed = (
-        f"📊 **Broadcaster Engine Status:** {bot_status}\n\n"
-        f"• **Account User Token:** {has_token}\n"
-        f"• **Destination Channel ID:** `{channel}`\n"
-        f"• **Time Interval Loop:** {interval} seconds\n"
-        f"• **Active Payload Content:** `{msg}`"
-    )
-    await interaction.response.send_message(status_embed, ephemeral=True)
-
-# Place your central Bot Token application credential down here
-bot.run("YOUR_BOT_TOKEN_HERE")
-                  
+bot.run(TOKEN)

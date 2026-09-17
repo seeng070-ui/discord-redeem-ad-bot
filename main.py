@@ -89,7 +89,7 @@ class AdvertiserBot(discord.Client):
                 url = f"https://discord.com{channel_id}/messages"
                 try:
                     response = requests.post(url, json=payload, headers=headers)
-                    if response.status_code in:
+                    if response.status_code in [200, 201, 204]:
                         print(f"[✓] User {user_id} dispatched message to channel {channel_id}")
                     else:
                         print(f"[✗] User {user_id} transmission failed for channel {channel_id}: {response.status_code}")

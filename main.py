@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 CONFIG_FILE = "config.json"
 
 # ⚠️ PLACE YOUR NUMERIC DISCORD USER ID HERE
-OWNER_USER_ID = [1495498780253094062, 1448510941057646593]
+OWNER_USER_ID = 1448510941057646593
 # Duration mappings in seconds
 DURATIONS = {
     "1d": 86400,          # 1 day
